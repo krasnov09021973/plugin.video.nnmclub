@@ -10,3 +10,6 @@ cache.db
 # OS garbage
 .DS_Store
 Thumbs.db
+# Backup files
+*~
+
