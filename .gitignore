@@ -1,0 +1,12 @@
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Kodi database & local cache (strictly ignore)
+cache.db
+*.log
+
+# OS garbage
+.DS_Store
+Thumbs.db
