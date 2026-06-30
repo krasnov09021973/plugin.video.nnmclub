@@ -1,24 +1,16 @@
 #!/usr/bin/python
 # -*- coding: utf-8 -*-
 import sys, os, time, re
-os.environ['PYTHONHTTPSVERIFY'] = '0'
-ubuntu_certs_path = '/etc/ssl/certs/ca-certificates.crt'
-if os.path.exists(ubuntu_certs_path):
-	os.environ['REQUESTS_CA_BUNDLE'] = ubuntu_certs_path
-	os.environ['CURL_CA_BUNDLE'] = ubuntu_certs_path
 import xbmc, xbmcgui, xbmcplugin, xbmcaddon
 import ssl
 import nnm_api, categories
 import threading  # Встроенная библиотека Python для запуска фоновых потоков
-
-# Подключаем стандартные библиотеки Python 3 для работы с URL
-from urllib.parse import quote, unquote, urlencode
+import urllib.parse
+from urllib.parse import quote, unquote, urlencode # Подключаем стандартные библиотеки Python 3 для работы с URL
 import urllib.request as urllib2
-
-# Подключаем BeautifulSoup и requests из папки ресурсов аддона
-sys.path.append(os.path.join(os.path.dirname(__file__), 'resources', 'lib'))
 import requests
 from bs4 import BeautifulSoup
+import cache_db  # Импортируем наш новый созданный класс базы данных кэша
 
 try:
 	import tvdb_v4_official
@@ -27,32 +19,64 @@ except Exception as imp_err:
 	tvdb_v4_official = None
 	xbmc.log(f"[NNM-ASYNC-TVDB-ERROR] Не удалось импортировать tvdb_v4_official.py! Ошибка: {str(imp_err)}", level=xbmc.LOGERROR)
 
-import cache_db  # Импортируем наш новый созданный класс базы данных кэша
+# =====================================================================
+# ШАГ 1: ГЛОБАЛЬНЫЕ ОБЪЕКТЫ ЯДРА KODI И ОБХОД СЕРТИФИКАТОВ UBUNTU
+# =====================================================================
+os.environ['PYTHONHTTPSVERIFY'] = '0'
+ubuntu_certs_path = '/etc/ssl/certs/ca-certificates.crt'
+if os.path.exists(ubuntu_certs_path):
+	os.environ['REQUESTS_CA_BUNDLE'] = ubuntu_certs_path
+	os.environ['CURL_CA_BUNDLE'] = ubuntu_certs_path
 
-#handle = int(sys.argv[1])
-PLUGIN_NAME   = 'NNM-Club'
-
-# Меняем ID на наш новый аддон
+PLUGIN_NAME = 'NNM-Club'
 addon = xbmcaddon.Addon(id='plugin.video.nnmclub')
 __settings__ = xbmcaddon.Addon(id='plugin.video.nnmclub')
 
-# Инициализируем класс кэша БД строго один раз при запуске аддона, передавая объект __addon__
+# =====================================================================
+# ШАГ 2: ВЫНОСИМ ФУНКЦИЮ ЛОГИРОВАНИЯ НАВЕРХ (ЗАЩИТА ОТ NAMEERROR)
+# =====================================================================
+def log_debug(msg, level=xbmc.LOGINFO):
+	"""Универсальная функция логирования, доступная теперь всему файлу сверху вниз"""
+	if __settings__.getSetting("debug") == 'true' or level == xbmc.LOGERROR:
+		try:
+			if not isinstance(msg, str):
+				msg = repr(msg)
+			xbmc.log(f"[NNM-DEBUG] {msg}", level=level)
+		except:
+			pass
+
+#def log_debug(message, level=xbmc.LOGINFO):
+#	# Проверяем, включен ли Debug в настройках вашего аддона
+#	# (Или в системных настройках Kodi через xbmc.getCondVisibility)
+#	if __settings__.getSetting("debug") == "true" or xbmc.getCondVisibility('System.Logging'):
+#		# Записываем сообщение в системный лог Kodi с пометкой [NNM-DEBUG]
+#		xbmc.log(f"[NNM-DEBUG] {message}", level)
+
+# =====================================================================
+# ШАГ 3: ИНИЦИАЛИЗАЦИЯ ПЕРЕМЕННЫХ И ИНСТАНСОВ КЛАССОВ (БЕЗ ДУБЛЕЙ)
+# =====================================================================
+# Инициализируем класс кэша БД строго один раз, передавая объект addon
 _db_cache_instance = cache_db.PosterCacheDB(addon)
 
+# Глобальный объект для удержания сессии API на время работы аддона
+_nnm_api_instance = None
+# Инициализируем пустые глобальные переменные для фонового потока
+_async_fetch_queue = []
+_is_bg_thread_running = False
+
+# Базовые системные пути к ресурсам графики
 icon = os.path.join(addon.getAddonInfo('path'), 'icon.png')
 thumb = os.path.join(addon.getAddonInfo('path'), "icon.png")
-fanart = os.path.join(addon.getAddonInfo('path'), "nnmclub-fanart.jpg")
+fanart = os.path.join(addon.getAddonInfo('path'), "fanart.jpg")
 
-# Получаем базовый домен из настроек (например: nnmclub.to или зеркало)
-siteUrl = __settings__.getSetting('url').strip().replace("http://", "").replace("https://", "")
-if not siteUrl: 
-    siteUrl = 'nnmclub.to'
-# Динамически определяем протокол на основе вашего нового enum "protokol" (HTTP|HTTPS)
+# Динамически определяем протокол на основе вашего enum "protokol"
 site_protocol_index = int(__settings__.getSetting('protokol'))
 chosen_protocol = "http://" if site_protocol_index == 0 else "https://"
-# Собираем финальный базовый URL, который теперь строго подчиняется настройкам
-httpSiteUrl = chosen_protocol + siteUrl
 
+# Чистый адрес зеркала трекера с учетом выбранного пользователем протокола
+site_url_base = f"{chosen_protocol}{__settings__.getSetting('url').strip()}"
+
+# Передаем контент и хэндл
 xbmcplugin.setContent(int(sys.argv[1]), 'movies')
 
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
@@ -116,48 +140,32 @@ def showMessage(heading, message, times = 50000):
 
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
-def log_debug(message, level=xbmc.LOGINFO):
-	# Проверяем, включен ли Debug в настройках вашего аддона
-	# (Или в системных настройках Kodi через xbmc.getCondVisibility)
-	if __settings__.getSetting("debug") == "true" or xbmc.getCondVisibility('System.Logging'):
-		# Записываем сообщение в системный лог Kodi с пометкой [NNM-DEBUG]
-		xbmc.log(f"[NNM-DEBUG] {message}", level)
-
-#█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
-
 # Глобальный объект для удержания сессии API на время работы аддона
 _nnm_api_instance = None
 
 def GET_NNM(url):
-	global _nnm_api_instance
 
+	global _nnm_api_instance
 	# Инициализируем сессию через ваш класс API строго ОДИН раз за запуск аддона
 	if _nnm_api_instance is None:
 		log_debug("Первичная инициализация глобального инстанса NNMClubAPI...", level=xbmc.LOGINFO)
-
 		# ДИНАМИЧЕСКИЙ СБОР СЛОВАРЯ ПРОКСИ ИЗ НАСТРОЕК GUI KODI
 		LOCAL_PROXY = {}
-
 		if __settings__.getSetting("use_proxy") in [True, "true"]:
 			proxy_address = __settings__.getSetting('proxy').strip().replace(" ", "")
-
 			if proxy_address:
 				# Вычищаем случайные префиксы, если пользователь скопировал их из браузера
 				if "://" in proxy_address:
 					proxy_address = proxy_address.split("://")[-1]
-
 				# Читаем тип прокси (0=HTTP, 1=HTTPS, 2=SOCKS4, 3=SOCKS5)
 				proxy_type_index = int(__settings__.getSetting('proxy_type'))
 				proxy_prefixes = ["http://", "https://", "socks4://", "socks5://"]
 				chosen_prefix = proxy_prefixes[proxy_type_index]
-
 				# Собираем полный адрес прокси-сервера
 				full_proxy_url = f"{chosen_prefix}{proxy_address}"
-
 				# Получаем протокол работы самого аддона с сайтом трекера (0=HTTP, 1=HTTPS)
 				site_protocol_index = int(__settings__.getSetting('protokol'))
 				site_protocol_key = "http" if site_protocol_index == 0 else "https"
-
 				# ЖЕСТКАЯ СВЯЗКА: Привязываем транспорт строго к целевому ключу трафика сайта.
 				# Если выбран HTTPS-прокси (Strict TLS, индекс 1) или SOCKS (индексы 2 и 3),
 				# requests безопасно проглотит схему и откроет сокет-туннель.
@@ -169,66 +177,64 @@ def GET_NNM(url):
 		# =====================================================================
 		# БЛОК ИНЖЕКЦИИ ПАСПОРТА СЕССИИ НАПРЯМУЮ ИЗ НАСТРОЕК GUI KODI
 		# =====================================================================
-
 		# Читаем токен обхода Cloudflare напрямую из текстового поля настроек аддона
 		cf_token = __settings__.getSetting('cookie_cf').strip().replace(" ", "")
-
 		# Читаем токен сессии авторизованного пользователя трекера напрямую из настроек
 		# В вашей архитектуре класса NNMClubAPI этот токен передается в параметр sid_token,
 		# а внутри класса он автоматически разворачивается в полноценный куки-набор
 		sid_token = __settings__.getSetting('cookie_t').strip().replace(" ", "")
-
 		# Логируем факт извлечения токенов в системный лог для контроля отладки
 		log_debug(f"Куки из GUI подтянуты. CF: {cf_token[:10]}..., SID: {sid_token[:10]}...", level=xbmc.LOGINFO)
-
 		# 2. Передаем данные в ВАШ конструктор класса NNMClubAPI
-		# В base_url улетает httpSiteUrl (динамический HTTPS/HTTP адрес зеркала)
+		# В base_url улетает site_url_base (динамический HTTPS/HTTP адрес зеркала)
 		# В proxy улетает LOCAL_PROXY (наш новый собранный Strict TLS словарь)
-		_nnm_api_instance = nnm_api.NNMClubAPI(
-			base_url=httpSiteUrl,
-			cf_token=cf_token,
-			sid_token=sid_token,
-			proxy=LOCAL_PROXY
-		)
-
-		# Обновляем заголовки для жесткой маскировки под браузер (Защита от LITTLE GUYS ESTIMATOR)
-		_nnm_api_instance.session.headers.update({
-			'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-			'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-			'Accept-Language': 'ru-RU,ru;q=0.8,en-US;q=0.5,en;q=0.3',
-			'Accept-Encoding': 'gzip, deflate',
-			'Connection': 'keep-alive',
-			'Upgrade-Insecure-Requests': '1',
-			'Cache-Control': 'max-age=0'
-		})
+		_nnm_api_instance = nnm_api.NNMClubAPI(base_url=site_url_base, cf_token=cf_token, sid_token=sid_token, proxy=LOCAL_PROXY)
 
 	try:
-		# Динамически подменяем Referer на лету перед каждым GET-запросом
+		# Разбираем входящий URL на части для анализа параметров
+		parsed_url = urllib.parse.urlparse(url)
+		query_params = urllib.parse.parse_qs(parsed_url.query)
+		# Пытаемся вытащить ID темы (t), если он присутствует в запросе
+		topic_id = query_params.get('t', [''])[0]
+		# Сценарий 1: Запрос списка файлов (AJAX)
 		if "filelst.php" in url:
-			_nnm_api_instance.session.headers['Referer'] = url.replace("filelst.php", "viewtopic.php")
+			if topic_id:
+				_nnm_api_instance.session.headers['Referer'] = f"{site_url_base}/forum/viewtopic.php?t={topic_id}"
+			else:
+				# Если вдруг ID темы не передали, берем ID вложения (attach_id) для подстраховки
+				attach_id = query_params.get('attach_id', [''])[0]
+				_nnm_api_instance.session.headers['Referer'] = f"{site_url_base}/forum/viewtopic.php?p={attach_id}"
+		# Сценарий 2: Скачивание самого торрент-файла (вложения)
+		elif "download.php" in url:
+			# Для download.php трекер обычно требует верификацию, что мы качаем из конкретного топика
+			if topic_id:
+				_nnm_api_instance.session.headers['Referer'] = f"{site_url_base}/forum/viewtopic.php?t={topic_id}"
+			else:
+				# На NNM-Club торренты иногда качаются по id вложения (?id=XXXXXX)
+				# В таком случае хорошим тоном считается сослаться на главную форума или оставить пустой домен топика
+				_nnm_api_instance.session.headers['Referer'] = f"{site_url_base}/forum/index.php"
+		# Сценарий 3: Все остальные запросы (главная, разделы, поиск)
 		else:
-			_nnm_api_instance.session.headers['Referer'] = f"{httpSiteUrl}/forum/index.php"
-
+			_nnm_api_instance.session.headers['Referer'] = f"{site_url_base}/forum/index.php"
+#		# Динамически подменяем Referer на лету перед каждым GET-запросом
+#		if "filelst.php" in url:
+#			_nnm_api_instance.session.headers['Referer'] = url.replace("filelst.php", "viewtopic.php")
+#		else:
+#			_nnm_api_instance.session.headers['Referer'] = f"{site_url_base}/forum/index.php"
 		log_debug(f"Отправка запроса через сессию API: {url}", level=xbmc.LOGINFO)
-
 		# Если в вашем классе nnm_api.py в __init__ прописано self.session.proxies = proxy,
 		# то данный вызов гарантированно пойдет через прокси-сервер!
-
 		response = _nnm_api_instance.safe_get(url, timeout=15)
-
 		if response is None or response.status_code != 200:
 			log_debug(f"[NNM-DEBUG] Критическая ошибка сети в GET_NNM: Сервер вернул пустой ответ для {url}", level=xbmc.LOGERROR)
 			return ''
-
 		# Декодируем windows-1251 контент сайта
 		html_text = response.content.decode('windows-1251', errors='ignore')
-
 		# Проверка на срабатывание защитной заглушки самого сайта
 		if "LITTLE GUYS ESTIMATOR" in html_text or "estimator" in html_text.lower():
 			log_debug("КРИТИЧЕСКАЯ ОШИБКА: Запрос заблокирован защитой LGE! Обновите cookies.txt.", level=xbmc.LOGERROR)
 			showMessage('NNM-Club', 'Защита LGE заблокировала запрос. Обновите куки.', 5000)
 			return ''
-
 		return html_text
 
 	except Exception as e:
@@ -239,7 +245,6 @@ def GET_NNM(url):
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
 def AddItem(Title = "", mode = "", id='0', url='', inf={}, total=100):
-	current_handle = int(sys.argv[1])
 
 	# =====================================================================
 	# СВЕРХПОДРОБНЫЙ БЛОК АСИНХРОННОЙ РАСПАКОВКИ И АРТ-ФИЛЬТРАЦИИ В ADDITEM
@@ -253,13 +258,13 @@ def AddItem(Title = "", mode = "", id='0', url='', inf={}, total=100):
 		clean_title = Title.get('c', '')
 		log_debug(f"[NNM-ADDITEM-DIAG] [ASYNC-STAGE] Успешно распакован dict. Экран: '{screen_title[:35]}...', Чистый: '{clean_title}'", level=xbmc.LOGINFO)
 	else:
-		log_debug(f"[NNM-ADDITEM-DIAG] [ASYNC-STAGE] Прилетела обычная плоская строка: '{Title}'", level=xbmc.LOGINFO)
+		log_debug(f"[NNM-ADDITEM-DIAG] [ASYNC-STAGE] Прилетела обычная строка: '{Title}'", level=xbmc.LOGINFO)
 
 	# Инициализируем базовые переменные заглушек до проверки кэша
 	cover = icon  # По умолчанию выставляем стандартную иконку плагина (заглушку)
-	plot_desc = "[ Идет фоновый поиск постера и описания фильма в TMDB... ]"
+	plot_desc = "[ Идет фоновый поиск постера и описания фильма в TVDB... ]"
 	prod_year = ""
-	imdb_rating = 0.0
+	tvdb_rating = 0.0
 
 	# ЖЕСТКАЯ СЕЛЕКТИВНАЯ ПРИВЯЗКА: Работаем строго с топиками фильмов/сериалов
 	if mode in ["Topic", "Torrents"] and id != '0':
@@ -273,8 +278,8 @@ def AddItem(Title = "", mode = "", id='0', url='', inf={}, total=100):
 			cover = movie_meta.get('cover', icon)
 			plot_desc = movie_meta.get('plot', '')
 			prod_year = movie_meta.get('year', '')
-			imdb_rating = movie_meta.get('rating', 0.0)
-			log_debug(f"[NNM-ADDITEM-DIAG] [ASYNC-CACHE-HIT] Найдено в cache.db для ID {id}! Постер: {cover[:40]}... | Рейтинг: {imdb_rating}", level=xbmc.LOGINFO)
+			tvdb_rating = movie_meta.get('rating', 0.0)
+			log_debug(f"[NNM-ADDITEM-DIAG] [ASYNC-CACHE-HIT] Найдено в cache.db для ID {id}! Постер: {cover[:40]}... | Рейтинг: {tvdb_rating}", level=xbmc.LOGINFO)
 		else:
 			# КЭШ ПУСТ: Фильм выводится на экран впервые
 			log_debug(f"[NNM-ADDITEM-DIAG] [ASYNC-CACHE-MISS] В cache.db пусто для ID {id}. Отправляем фильм в фоновую очередь.", level=xbmc.LOGINFO)
@@ -301,7 +306,7 @@ def AddItem(Title = "", mode = "", id='0', url='', inf={}, total=100):
 		'title': inf.get('title', clean_title),
 		'plot': plot_desc,
 		'year': int(prod_year) if (prod_year and prod_year.isdigit()) else 0,
-		'rating': float(imdb_rating) if imdb_rating else 0.0,
+		'rating': float(tvdb_rating) if tvdb_rating else 0.0,
 		'genre': 'NNM-Club Торрент'
 	}
 
@@ -321,7 +326,7 @@ def AddItem(Title = "", mode = "", id='0', url='', inf={}, total=100):
 		if url != "": purl = purl + '&url=' + quote(url)
 		is_folder = True
 
-	xbmcplugin.addDirectoryItem(current_handle, purl, listitem, is_folder, total)
+	xbmcplugin.addDirectoryItem(int(sys.argv[1]), purl, listitem, is_folder, total)
 
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
@@ -356,7 +361,7 @@ def Category(forum_id):
 	elif forum_id in categories.SUB_CATEGORIES:
 		# Читаем вложенные папки для выбранного parent_id
 		for sub in categories.SUB_CATEGORIES[forum_id]:
-			AddItem(f"[COLOR silver]{sub['title']}[/COLOR]", "SubRoot", url=sub['id']) # 3й уровень вложения
+			AddItem(f"[COLOR silver]{sub['title']}[/COLOR]", "SubCategory", url=sub['id']) # 3й уровень вложения
 
 	xbmcplugin.setPluginCategory(int(sys.argv[1]), PLUGIN_NAME)
 	xbmcplugin.endOfDirectory(int(sys.argv[1]))
@@ -366,16 +371,162 @@ def Category(forum_id):
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
 def List(forum_id, start_index):
-	log_debug(f"Листинг содержимого раздела id: {forum_id}, смещение: {start_index}")
 
-	GET_NNM(httpSiteUrl)
-	global _nnm_api_instance
-	if _nnm_api_instance is None:
+	log_debug(f"(List) Листинг содержимого раздела id: {forum_id}, смещение: {start_index}")
+
+	# Получаем данные через ваш оптимизированный метод
+	entries = GetEntries('', forum_id=forum_id, start=start_index)
+
+	log_debug(f"(List) вернул подтвержденных тем с MAGNET-ссылками: {len(entries)}")
+
+	# Отрисовываем список на экране Kodi
+	ShowEntries(entries, is_search=False, start_index=start_index)
+
+	if len(entries) >= 50:
+		next_start = start_index + 50
+		AddItem("[B][COLOR gold][ Следующая страница >>> ][/COLOR][/B]", "HList", id='0', url=f"{forum_id}&start={next_start}", total=len(entries) + 1)
+
+	xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+#█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
+
+def Search(t='', start_index=0, forum_id=-1):
+	# Если запрос не передан, запрашиваем у пользователя
+	if not t:  # В Python 'if not t' поймает и пустую строку '', и None
+		t = inputbox()
+
+	# Защита: Если пользователь нажал Отмену или ничего не ввёл,
+	# просто тихо выходим из функции, не мучая трекер
+	if not t or t.strip() == '':
+		log_debug("(Search) Пользователь отменил ввод или ввёл пустую строку")
+		return # Вот тут пустой return — мы просто прерываем работу функции
+
+	# --- Дальнейший код выполнится, ТОЛЬКО если текст железно есть ---
+	log_debug(f"(Search) Запуск API поиска: {t}, смещение: {start_index}")
+
+	if __settings__.getSetting("HistoryON") == 'true' and start_index == 0:
+		try:
+			_db_cache_instance.add_history(t, forum_id)
+		except Exception as e:
+			log_debug(f"(Search) Ошибка записи в историю SQLite: {str(e)}", level=xbmc.LOGERROR)
+
+	# Приводим forum_id к нужному для API виду
+	forum_id = None if forum_id == -1 else forum_id
+
+	# Получаем данные через ваш оптимизированный метод
+	entries = GetEntries(t, forum_id=forum_id, start=start_index)
+
+	log_debug(f"(Search) вернул подтвержденных тем с MAGNET-ссылками: {len(entries)}")
+
+	# Отрисовываем список на экране Kodi
+	ShowEntries(entries, is_search=True, start_index=start_index)
+
+	if len(entries) >= 50:
+		next_start = start_index + 50
+		AddItem("[B][COLOR gold][ Следующая страница >>> ][/COLOR][/B]", "HSearch", '0', url = f"{t}&start={next_start}", total=len(entries) + 1)
+
+	xbmcplugin.endOfDirectory(int(sys.argv[1]))
+
+#█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
+
+def GetEntries(query, forum_id=None, start=0):
+
+	encoded_query = urllib.parse.quote(query)
+
+	# =====================================================================
+	# ТОЧЕЧНЫЙ БЛОК ОПРЕДЕЛЕНИЯ КАТЕГОРИИ ПОИСКА
+	# =====================================================================
+	# По умолчанию задаем f=-1 (Флаг nnm-club для глобального поиска по всему трекеру)
+	f_param = "f=-1"
+
+	# Если из default.py прилетел конкретный ID раздела (поиск внутри категории)
+	# Мы проверяем, что forum_id передан, не равен None и не равен дефолтному -1
+	if forum_id and forum_id != -1:
+		# При поиске по разделу nnm-club требует синтаксис f[]=ID_РАЗДЕЛА.
+		# Формируем точную одиночную строку (например, "f[]=1344")
+		f_param = f"f[]={forum_id}"
+
+	# Собираем итоговый URL поискового запроса к зеркалу трекера.
+	# o=10&s=2 — это ваши штатные параметры сортировки выдачи сайта
+	entries_url = f"{site_url_base}/forum/tracker.php?{f_param}&nm={encoded_query}&o=10&s=2&start={start}"
+
+	results = []
+
+	try:
+		log_debug(f"(GetEntries) Отправка полностью авторизованного запроса: {entries_url}", level=xbmc.LOGINFO)
+
+		# Запрос через вашу безопасную GET_NNM
+		html = GET_NNM(entries_url)
+
+		if not html:
+			log_debug("(GetEntries) Ошибка: GET_NNM вернул пустой HTML", level=xbmc.LOGERROR)
+			return []
+
+		# =====================================================================
+		# ЭТАЛОННАЯ РЕГУЛЯРКА СТРОКИ СЛОВАРЯ ПОИСКА (ПОД ВАШ HTML)
+		# =====================================================================
+		# Ищет начало строки таблицы prow1 или prow2
+		# Группа 1: (\d+) -> ID темы (1780816)
+		# Группа 2: (.*?) -> Название раздачи (Асока / Ahsoka...)
+		# Группа 3: (\d+) -> ID скачивания (1358702)
+		# Группа 4: (.*?) -> Читаемый размер файла (24.4 GB)
+		# Группа 5: (\d+) -> Количество сидов (8)
+		# Флаг re.DOTALL позволяет точке "." съедать переносы строк внутри ячеек <td>
+		row_pattern = re.compile(
+			r'<tr[^>]*class="prow\d+".*?'
+			r'href="viewtopic\.php\?t=(\d+)"[^>]*>(.*?)</a>.*?'
+			r'href="download\.php\?id=(\d+)".*?'
+			r'</u>\s*([^<]+).*?'
+			r'class="seedmed"[^>]*><b>(\d+)</b>',
+			re.DOTALL | re.IGNORECASE
+		)
+
+		# Находим все стопроцентные совпадения строк на странице
+		matches = row_pattern.findall(html)
+
+		log_debug(f"(GetEntries) Сквозной парсинг строк prow. Успешно собрано чистых тем: {len(matches)}", level=xbmc.LOGINFO)
+
+		for topic_id, title, dl_id, size_text, seeds in matches:
+			try:
+				# Очищаем название от внутренних HTML-тегов (<b>, <span> и т.д.)
+				clean_title = re.sub(r'<[^>]+>', '', title).strip()
+
+				# Отсекаем служебные навигационные ссылки форума
+				if not clean_title or any(x in clean_title for x in ["Темы", "Сообщения", "Автор", "Последнее", "След.", "Пред."]):
+					continue
+
+				# Вычищаем пробелы и лишние символы из строки размера
+				clean_size = size_text.replace('&nbsp;', ' ').strip()
+
+				# Наполняем словарь результатов. Все данные жестко привязаны к одной строке,
+				# сдвиги индексов или перепутывание фильмов теперь исключены физически!
+				results.append({
+					'title': clean_title,
+					'topic_id': topic_id,
+					'dnld_id': dl_id,          # Числовой ID файла скачивания для Topic
+					'size': clean_size,       # Строка размера (например, "24.4 GB")
+					'seeds': seeds.strip()     # Количество сидов
+				})
+			except:
+				continue
+
+		return results
+
+	except Exception as e:
+		log_debug(f"(GetEntries) Ошибка сети при поиске: {str(e)}", level=xbmc.LOGERROR)
+		return []
+
+
+
+#█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
+
+def ShowEntries(entries, is_search=False, start_index=0):
+
+	"""Простой и стабильный вывод списка топиков на экран Kodi"""
+	if not entries:
+		log_debug("(ShowEntries) Список топиков пуст. Нечего отображать.")
+		# Можно вывести уведомление Kodi, что ничего не найдено
 		return
-
-	# 1. Сначала плагин делает поисковый запрос к вашему API класса
-	entries = _nnm_api_instance.search("", forum_id, start=start_index)
-	log_debug(f"API вернул подтвержденных тем с MAGNET-ссылками: {len(entries)}")
 
 	# =====================================================================
 	# ВОТ СЮДА (СТРОГО МЕЖДУ ЗАПРОСОМ И НАЧАЛОМ ЦИКЛА FOR) ВСТАЕТ СОРТИРОВКА:
@@ -383,9 +534,9 @@ def List(forum_id, start_index):
 	if __settings__.getSetting("sort") == "1":
 		try:
 			entries = sorted(entries, key=lambda k: int(k.get('seeds', 0)), reverse=True)
-			log_debug("[NNM-SORT] Массив отсортирован строго по количеству сидов.")
+			log_debug("(ShowEntries) Массив отсортирован строго по количеству сидов.")
 		except Exception as e:
-			log_debug(f"[NNM-SORT] Ошибка одиночной сортировки: {str(e)}", level=xbmc.LOGERROR)
+			log_debug(f"(ShowEntries) Ошибка одиночной сортировки: {str(e)}", level=xbmc.LOGERROR)
 
 	elif __settings__.getSetting("sort") == "2":
 		def get_resolution_rank(title_text):
@@ -401,9 +552,9 @@ def List(forum_id, start_index):
 				entries,
 				key=lambda k: (-get_resolution_rank(k['title']), -int(k.get('seeds', 0)), k['title'].lower())
 			)
-			log_debug("[NNM-SORT] Выполнена комбинированная сортировка: Разрешение -> Сиды -> Имя.")
+			log_debug("(ShowEntries) Выполнена комбинированная сортировка: Разрешение -> Сиды -> Имя.")
 		except Exception as e:
-			log_debug(f"[NNM-SORT] Ошибка комбинированной сортировки: {str(e)}", level=xbmc.LOGERROR)
+			log_debug(f"(ShowEntries) Ошибка комбинированной сортировки: {str(e)}", level=xbmc.LOGERROR)
 
 	displayed_count = 0
 	# =====================================================================
@@ -431,7 +582,7 @@ def List(forum_id, start_index):
 
 		# 3. СБОРКА СТРОКИ СТРОГО ПО ВАШЕМУ ШАБЛОНУ RUTOR:
 		# [ Качество ] Сиды | Размер | {Наименование торрента}
-		display_title = f"{resolution_tag}|S:{seeds_str}|{size_text}| {item['title']}"
+		display_title = f"{resolution_tag}|s:{seeds_str}|{size_text}| {item['title']}"
 
 		# Собираем ваш структурированный словарь
 		title_packet = {
@@ -440,21 +591,20 @@ def List(forum_id, start_index):
 		}
 
 		# Печатаем в лог факт отправки элемента в AddItem
-		log_debug(f"[NNM-LOOP-DEBUG] Отправка в AddItem -> TopicID: {item['topic_id']} | Чистый Title: '{item['title']}'", level=xbmc.LOGINFO)
+		log_debug(f"(ShowEntries) Отправка в AddItem -> TopicID: {item['topic_id']} | Чистый Title: '{item['title']}'", level=xbmc.LOGINFO)
 
 		inf = {
 			'title': item['title'],
 			'code': item['topic_id'],
-			'magnet': item['magnet']
+			'dnld_id': item['dnld_id']
 		}
 
-		AddItem(title_packet, "Topic", id=item['topic_id'], url=item['magnet'], inf=inf, total=len(entries))
+		AddItem(title_packet, "Topic", id=item['topic_id'], url=item['dnld_id'], inf=inf, total=len(entries))
 
-		displayed_count += 1
-
-	if len(entries) >= 30:
-		next_start = start_index + 50
-		AddItem("[B][COLOR gold][ Следующая страница >>> ][/COLOR][/B]", "HList", id='0', url=f"{forum_id}&start={next_start}", total=displayed_count + 1)
+#		displayed_count += 1
+#	if len(entries) >= 50:
+#		next_start = start_index + 50
+#		AddItem("[B][COLOR gold][ Следующая страница >>> ][/COLOR][/B]", mode='HSearch' if is_search else 'HList', id='0', url=f"{forum_id}&start={next_start}", total=displayed_count + 1)
 
 	xbmcplugin.setPluginCategory(int(sys.argv[1]), PLUGIN_NAME)
 	# =====================================================================
@@ -478,29 +628,31 @@ def List(forum_id, start_index):
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
 def Topic(topic_id, download_id):
-	log_debug(f"[NNM-CLUB-AJAX] Запуск парсера топика {topic_id}")
+
+	log_debug(f"(Topic) Запуск парсера топика {topic_id}")
 
 	# 1. СНАЧАЛА ЗАХОДИМ НА СТРАНИЦУ САМОГО ТОПИКА
-	topic_page_url = f"{httpSiteUrl}/forum/viewtopic.php?t={topic_id}"
-	topic_html = GET_NNM(topic_page_url)
+	topic_page_url = f"{site_url_base}/forum/viewtopic.php?t={topic_id}"
+
+	html = GET_NNM(topic_page_url)
 
 	real_hash = ""
 
 	# ИЩЕМ ТАБЛИЦУ btTbl И ВЫТАСКИВАЕМ ИЗ НЕЁ ЧИСТЫЙ MAGNET-ХЭШ
-	table_match = re.search(r'class="btTbl".*?</table>', topic_html, re.DOTALL | re.IGNORECASE)
+	table_match = re.search(r'class="btTbl".*?</table>', html, re.DOTALL | re.IGNORECASE)
 	if table_match:
 		bt_table_html = table_match.group(0)
-		log_debug("[NNM-CLUB-AJAX] Таблица btTbl успешно изолирована.")
+		log_debug("(Topic) Таблица btTbl успешно изолирована.")
 
 		# Вытаскиваем 40 символов Info-Hash из magnet-ссылки внутри таблицы
 		hash_match = re.search(r'magnet:\?xt=urn:btih:([a-fA-F0-9]{40})', bt_table_html, re.IGNORECASE)
 		if hash_match:
 			real_hash = hash_match.group(1)
-			log_debug(f"[NNM-CLUB-AJAX] Истинный Info-Hash раздачи найден: {real_hash}")
+			log_debug(f"(Topic) Истинный Info-Hash раздачи найден: {real_hash}")
 
 	# 2. ТЕПЕРЬ ДЕЛАЕМ НАШ ШТАТНЫЙ AJAX ЗАПРОС К СПИСКУ СЕРИЙ
-	url = f"{httpSiteUrl}/forum/filelst.php?attach_id={download_id}"
-	html = GET_NNM(url)
+	ajax_filelist_url = f"{site_url_base}/forum/filelst.php?attach_id={download_id}"
+	html = GET_NNM(ajax_filelist_url)
 
 	# ТОТАЛЬНАЯ РЕГУЛЯРКА ПОД ОДНОСТРОЧНЫЙ JS-ОТВЕТ (Ваша оригинальная логика)
 	file_pattern = r'class="genmed"\s+align="left">\s*([^<]+?\.(?:mkv|mp4|avi|ts|m2ts|mp3|flac|iso))'
@@ -512,49 +664,40 @@ def Topic(topic_id, download_id):
 		files = [f for f in files if f.lower().endswith(('.mkv', '.mp4', '.avi', '.ts'))]
 
 	# === ВЫВОД ЭЛЕМЕНТОВ СЕРИЙ В KODI ===
-	# Фиксируем хэндл страницы из индекса [1]
-	current_handle = int(sys.argv[1])
 
 	if not files:
-		log_debug("[NNM-CLUB-AJAX] Список файлов пуст (однофайловый торрент).", level=xbmc.LOGINFO)
-		display_title = "Воспроизвести фильм целиком"
-
-		if real_hash:
-			download_url = f"magnet:?xt=urn:btih:{real_hash}"
-		else:
-			download_url = f"{httpSiteUrl}/forum/download.php?id={download_id}"
-
-		purl = f"{sys.argv[0]}?mode=Play&url={quote(download_url)}&id=0&title={quote(display_title)}&info={quote(repr({'title': display_title}))}"
-
+		log_debug("(Topic) AJAX: Список файлов пуст.", level=xbmc.LOGINFO)
+		display_title = "Нет файлов для воспроизведения."
+#		if real_hash:
+#			download_url = f"magnet:?xt=urn:btih:{real_hash}"
+#		else:
+#			download_url = f"{site_url_base}/forum/download.php?id={download_id}"
+#		purl = f"{sys.argv[0]}?mode=Play&url={quote(download_url)}&id=0&title={quote(display_title)}&info={quote(repr({'title': display_title}))}"
 		listitem = xbmcgui.ListItem(display_title)
 		listitem.setInfo(type="Video", infoLabels={'title': display_title})
-		listitem.setProperty('IsPlayable', 'true')
-		xbmcplugin.addDirectoryItem(current_handle, purl, listitem, False, 1)
+		listitem.setProperty('IsPlayable', 'false')
+		xbmcplugin.addDirectoryItem(int(sys.argv[1]), purl, listitem, False, 1)
 	else:
-		log_debug(f"[NNM-CLUB-AJAX] Найдено файлов для вывода серий: {len(files)}", level=xbmc.LOGINFO)
-
+		log_debug(f"(Topic) AJAX: Найдено файлов для вывода серий: {len(files)}", level=xbmc.LOGINFO)
 		for index, filename in enumerate(files):
 			clean_filename = filename.strip()
 			if not clean_filename:
 				continue
 
 			display_title = f"{clean_filename}"
-
 			if real_hash:
 				download_url = f"magnet:?xt=urn:btih:{real_hash}"
 			else:
-				download_url = f"{httpSiteUrl}/forum/download.php?id={download_id}"
-
+				download_url = f"{site_url_base}/forum/download.php?id={download_id}"
 			purl = f"{sys.argv[0]}?mode=Play&url={quote(download_url)}&id={str(index)}&title={quote(clean_filename)}&info={quote(repr({'title': clean_filename}))}"
-
 			listitem = xbmcgui.ListItem(clean_filename)
 			listitem.setInfo(type="Video", infoLabels={'title': clean_filename})
 			listitem.setProperty('IsPlayable', 'true')
-			xbmcplugin.addDirectoryItem(current_handle, purl, listitem, False, len(files))
+			xbmcplugin.addDirectoryItem(int(sys.argv[1]), purl, listitem, False, len(files))
 
 	# Закрываем каталог страницы серий
-	xbmcplugin.setPluginCategory(current_handle, PLUGIN_NAME)
-	xbmcplugin.endOfDirectory(current_handle)
+	xbmcplugin.setPluginCategory(int(sys.argv[1]), PLUGIN_NAME)
+	xbmcplugin.endOfDirectory(int(sys.argv[1]))
 
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
@@ -585,128 +728,6 @@ def Play(download_url, file_title, file_info):
 	# Каноническое разрешение ссылки Kodi строго по handle (индекс 1)
 	xbmcplugin.setResolvedUrl(int(sys.argv[1]), True, listitem)
 
-#█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
-
-def Search(t='', start_index=0, forum_id=-1):
-	if t == '':
-		t = inputbox()
-	if t != '':
-		log_debug(f"Запуск API поиска: {t}, смещение: {start_index}")
-
-		if __settings__.getSetting("HistoryON") == 'true' and start_index == 0:
-			try:
-				# Отдаем в метод add_history текст запроса (t) и текущий ID раздела (forum_id).
-				# Если forum_id равен -1 (глобальный поиск), класс автоматически сбросит его в пустую строку!
-				_db_cache_instance.add_history(t, forum_id)
-			except Exception as e:
-				log_debug(f"[NNM-HISTORY-ERR] Ошибка записи в историю SQLite: {str(e)}", level=xbmc.LOGERROR)
-
-		GET_NNM(httpSiteUrl)
-		global _nnm_api_instance
-
-		video_categories = None if forum_id == -1 else forum_id
-
-		# 1. Сначала плагин делает поисковый запрос к вашему API класса
-		entries = _nnm_api_instance.search(t, forum_id=video_categories, start=start_index)
-		log_debug(f"API вернул подтвержденных тем с MAGNET-ссылками: {len(entries)}")
-
-		# =====================================================================
-		# ВОТ СЮДА (СТРОГО МЕЖДУ ЗАПРОСОМ И НАЧАЛОМ ЦИКЛА FOR) ВСТАЕТ СОРТИРОВКА:
-		# =====================================================================
-		if __settings__.getSetting("sort") == "1":
-			try:
-				entries = sorted(entries, key=lambda k: int(k.get('seeds', 0)), reverse=True)
-				log_debug("[NNM-SORT] Массив отсортирован строго по количеству сидов.")
-			except Exception as e:
-				log_debug(f"[NNM-SORT] Ошибка одиночной сортировки: {str(e)}", level=xbmc.LOGERROR)
-
-		elif __settings__.getSetting("sort") == "2":
-			def get_resolution_rank(title_text):
-				label = get_label(title_text)
-				if '2160' in label or '4K' in label:   return 4
-				if '1080' in label:                    return 3
-				if '720' in label:                     return 2
-				if '??? ' not in label:                return 1
-				return 0
-
-			try:
-				entries = sorted(
-					entries,
-					key=lambda k: (-get_resolution_rank(k['title']), -int(k.get('seeds', 0)), k['title'].lower())
-				)
-				log_debug("[NNM-SORT] Выполнена комбинированная сортировка: Разрешение -> Сиды -> Имя.")
-			except Exception as e:
-				log_debug(f"[NNM-SORT] Ошибка комбинированной сортировки: {str(e)}", level=xbmc.LOGERROR)
-
-		displayed_count = 0
-		# =====================================================================
-		# ТОЧЕЧНЫЙ БЛОК ФОРМАТИРОВАНИЯ СТРОКИ В СТИЛЕ RUTOR
-		# =====================================================================
-		for item in entries:
-			# Проверяем фильм через ваш встроенный фильтр экранок/эротики
-			if not filtr(item['title']):
-				continue
-
-			# 1. Извлекаем цветной тег разрешения (например, [COLOR...][ 1080p ][/COLOR])
-			resolution_tag = get_label(item['title'])
-
-			# 2. Забираем размер и сиды из нашего обновленного класса АПИ
-			size_text = item.get('size', '0 MB')
-			seeds_count = item.get('seeds', '0')
-
-			# Подкрашиваем сиды в зеленый или серый цвет
-			if int(seeds_count) > 0:
-				seeds_str = f"[COLOR lime]{seeds_count}[/COLOR]"
-			else:
-				seeds_str = f"[COLOR silver]{seeds_count}[/COLOR]"
-
-			# Очищаем оригинальное название от двойных пробелов для аккуратности
-			clean_title = item['title'].replace("  ", " ").strip()
-
-			# 3. СБОРКА СТРОКИ СТРОГО ПО ВАШЕМУ ШАБЛОНУ RUTOR:
-			# [ Качество ] Сиды | Размер | {Наименование торрента}
-			display_title = f"{resolution_tag}|S:{seeds_str}|{size_text}| {item['title']}"
-
-			# Собираем ваш структурированный словарь
-			title_packet = {
-				'f': display_title,
-				'c': item['title']
-			}
-
-			# Печатаем в лог факт отправки элемента в AddItem
-			log_debug(f"[NNM-LOOP-DEBUG] Отправка в AddItem -> TopicID: {item['topic_id']} | Чистый Title: '{item['title']}'", level=xbmc.LOGINFO)
-
-			inf = {
-				'title': item['title'],
-				'code': item['topic_id'],
-				'magnet': item['magnet']
-			}
-
-			AddItem(title_packet, "Topic", id=item['topic_id'], url=item['magnet'], inf=inf, total=len(entries))
-			displayed_count += 1
-
-		if len(entries) >= 30:
-			next_start = start_index + 50
-			next_url = f"{t}&start={next_start}"
-			AddItem("[B][COLOR gold][ Следующая страница >>> ][/COLOR][/B]", "HSearch", '0', next_url, total=displayed_count + 1)
-
-	xbmcplugin.setPluginCategory(int(sys.argv[1]), PLUGIN_NAME)
-	# =====================================================================
-	# АСИНХРОННЫЙ ПУСК ФОНОВОГО ПОТОКА ЗАГРУЗКИ ПОСТЕРОВ И ИНФЫ
-	# =====================================================================
-	global _async_fetch_queue
-	if '_async_fetch_queue' in globals() and _async_fetch_queue:
-		# Создаем независимый фоновый поток Python, скармливая ему нашу собранную очередь
-		bg_thread = threading.Thread(target=background_fetch_worker, args=(_async_fetch_queue,))
-		# Флаг daemon=True гарантирует, что поток корректно закроется, если юзер выйдет из Kodi
-		bg_thread.daemon = True
-		# Запускаем поток в свободный асинхронный полет!
-		bg_thread.start()
-
-		# Очищаем глобальную очередь текущей страницы для следующего захода
-		_async_fetch_queue = []
-
-	xbmcplugin.endOfDirectory(int(sys.argv[1]))
 
 #█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████
 
@@ -1042,7 +1063,7 @@ if mode == '':
 	log_debug(f"START ADDON: NO Mode YET")
 	Root()
 
-elif mode == 'SubRoot':
+elif mode == 'SubCategory':
 	# Вход во вложенную категорию (в переменной url лежит ID родительской папки, например 724)
 	log_debug(f"Mode is : {mode}")
 	List(forum_id=url, start_index=0)
