@@ -1,41 +1,40 @@
 <?xml version="1.0" encoding="utf-8" standalone="yes"?>
 <settings>
     <category label="Основные">
-        <setting id="protokol"      type="enum" label="Протокол сайта"            default="0" values="HTTP|HTTPS"/>
-        <setting id="url"           type="text" label="URL зеркала трекера"       default="nnmclub.to"/>
+        <setting id="protokol"      type="enum"  label="Протокол сайта"              default="0" values="HTTP|HTTPS"/>
+        <setting id="url"           type="text"  label="URL зеркала трекера"         default="nnmclub.to"/>
         <!-- ================================================================= -->
         <!-- БЛОК ПАСПОРТА СЕССИИ (КУКИ АВТОРИЗАЦИИ И ОБХОДА CLOUDFLARE)         -->
-        <!-- Текстовые поля для прямого ввода токенов, скопированных из Waterfox-->
+        <!-- Текстовые поля для прямого ввода токенов, скопированных из броузера-->
         <!-- ================================================================= -->
+        <!-- Поле для ввода куки обхода Cloudflare. По умолчанию пустая строка  option="hidden" -->
+        <setting id="cookie_cf"    type="text"   label="Кука Cloudflare (cf_clearance)" default=""/>
+        <!-- Поле для ввода слепка сессии авторизованного юзера. По умолчанию пусто  option="hidden" -->
+        <setting id="cookie_t"     type="text"   label="Кука сессии трекера (phpbb2mysql_4_t)" default=""/>
 
-        <!-- Поле для ввода куки обхода Cloudflare. По умолчанию пустая строка -->
-        <setting id="cookie_cf" type="text" label="Кука Cloudflare (cf_clearance)" default=""/>
-
-        <!-- Поле для ввода слепка сессии авторизованного юзера. По умолчанию пусто -->
-        <setting id="cookie_t"  type="text" label="Кука сессии трекера (phpbb2mysql_4_t)" default=""/>
-
-        <!-- Сетевой туннель: Оставляем ваше идеальное решение antizapret proxy 2 сервера 195.123.208.133:8443 и 195.123.208.133:8443-->
-        <setting id="use_proxy"     type="bool" label="Использовать прокси"       default="true"/>
-        <setting id="proxy"         type="text" label="IP-адрес:Порт"             default="176.123.8.97:8443" visible="eq(-1,true)"/>
-        <setting id="proxy_type"    type="enum" label="Тип прокси"                default="1" values="HTTP|HTTPS|SOCKS4|SOCKS5" visible="eq(-2,true)"/>
-        <setting id="debug"         type="bool" label="Отладка (Логирование)"     default="true"/>
+        <!-- Сетевой туннель: Оставляем ваше идеальное решение antizapret proxy 2 сервера 176.123.8.97:8443 и 195.123.208.133:8443-->
+        <setting id="use_proxy"    type="bool"   label="Использовать прокси"         default="true"/>
+        <setting id="proxy"        type="text"   label="IP-адрес:Порт"               default="176.123.8.97:8443" visible="eq(-1,true)"/>
+        <setting id="proxy_type"   type="enum"   label="Тип прокси"                  default="1" values="HTTP|HTTPS|SOCKS4|SOCKS5" visible="eq(-2,true)"/>
+        <setting id="debug"        type="bool"   label="Отладка (Логирование)"       default="true"/>
 
     </category>
 
     <category label="Дополнительно">
-        <setting id="ListView"     type="enum" label="Вид списков Kodi"  default="0" values="Не менять|Вид 1|Вид 2|Вид 3|Вид 4|Вид 5|Вид 6|Вид 7|Вид 8|Вид 9|Вид 10|Вид 11|Вид 12"/>
+        <setting id="view_type"    type="enum"   label="Вид списков Kodi"             default="0" values="Не менять|Вид 1|Вид 2|Вид 3|Вид 4|Вид 5|Вид 6|Вид 7|Вид 8|Вид 9|Вид 10|Вид 11|Вид 12"/>
         <!-- Новая комбинированная сортировка -->
-        <setting id="sort" type="enum" label="Упорядочить списки"        default="1" values="По умолчанию|Количество сидов|Разрешение + Сиды + Имя"/>
-        <setting id="CategoryON"   type="bool" label="Разделы форума в корне"    default="true"/>
-        <setting id="HistoryON"    type="bool" label="История поиска"    default="true"/>
-        <setting id="CatSearchON"  type="bool" label="Поиск по разделам" default="true"  visible="eq(-1,true)"/>
-
-        <setting id="show_info"    type="bool" label="Загружать Инфо и Арт с TheTvDB.com"  default="true" />
-        <setting id="tvdb_key"     type="text" label="TheTvDB.com API key"        default="dd1ab361-e995-47dc-843f-75cb90366faf"  visible="eq(-1,true)"/>
-        <setting id="pic_cache"    type="bool" label="Кэшировать обложки"  default="true"  visible="eq(-2,true)"/>
-
-        <setting id="Hide Scr"     type="bool" label="Скрыть экранки"    default="false"/>
-        <setting id="EnabledFiltr" type="bool" label="Использовать фильтр" default="false"/>
-        <setting id="Filtr"        type="text" label="Фильтр слов (через запятую):" visible="eq(-1,true)" default="эротика"/>
+        <setting id="sort"         type="enum"   label="Упорядочить списки"                   default="1" values="По умолчанию|Количество сидов|Разрешение + Сиды + Имя"/>
+        <setting id="cat_inroot"   type="bool"   label="Разделы форума в корне"       default="true"/>
+        <setting id="search_hist"  type="bool"   label="История поиска"               default="true"/>
+        <setting id="cat_search"   type="bool"   label="Поиск по разделам"            default="true"/>
+        <setting id="ext_search"   type="bool"   label="Расширенный поиск"            default="true"/>
+        <setting id="view_hist"    type="bool"   label="История просмотра"            default="true"/>
+        <setting id="show_info"    type="bool"   label="Загружать Инфо и Арт с TheTvDB.com"  default="true" />
+        <setting id="tvdb_key"     type="text"   label="TheTvDB.com API key"          default="dd1ab361-e995-47dc-843f-75cb90366faf" visible="eq(-1,true)"/>
+        <setting id="pic_cache"    type="bool"   label="Кэшировать обложки"           default="true"  visible="eq(-2,true)"/>
+        <setting id="hide_scr"     type="bool"   label="Скрыть экранки"               default="false"/>
+        <setting id="hide_zero"    type="bool"   label="Скрыть раздачи с 0 сидов"     default="false"/>
+        <setting id="use_filter"   type="bool"   label="Использовать фильтр"          default="false"/>
+        <setting id="filter"       type="text"   label="Фильтр слов (через запятую):" visible="eq(-1,true)" default="эротика"/>
     </category>
 </settings>
