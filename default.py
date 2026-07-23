@@ -516,7 +516,8 @@ def List(forum_id, search_id=None, offset=0):
 	search_id = entries.get('search_id')
 
 	# Отрисовываем список на экране Kodi
-	ShowEntries(entries, is_search=False)
+	#ShowEntries(entries, is_search=False)
+	ShowEntries(entries.get('topics_list', []), is_search=False)
 
 #	if len(entries) >= 40:
 #		offset = offset + 50
@@ -766,11 +767,14 @@ def ShowEntries(entries, is_search=False):
 	# =====================================================================
 	for item in entries:
 
+		pretty_dict = json.dumps(item, indent=4, ensure_ascii=False)
+		log_debug(f"(ShowEntries) На входе в ParseTitle : {pretty_dict}")
+
 		if not topic_filter(item['title']):
 			continue
 
-#		pretty_dict = json.dumps(item, indent=4, ensure_ascii=False)
-#		log_debug(f"(ShowEntries) На входе в ParseTitle : {pretty_dict}")
+		#pretty_dict = json.dumps(item, indent=4, ensure_ascii=False)
+		#log_debug(f"(ShowEntries) На входе в ParseTitle : {pretty_dict}")
 
 		title_packet = ParseTitle(item)
 
@@ -1838,8 +1842,8 @@ except: pass
 
 
 log_debug(f"Mode is : {mode}")
-pretty_dict = json.dumps(params, indent=4, ensure_ascii=False)
-log_debug(f"ADDON Startup params is : {pretty_dict}")
+#pretty_dict = json.dumps(params, indent=4, ensure_ascii=False)
+#log_debug(f"ADDON Startup params is : {pretty_dict}")
 
 # Строгий последовательный вызов режимов, исключающий наложение потоков
 if mode == '':
@@ -1886,8 +1890,8 @@ elif mode in ['Search', 'SearchInCategory']:
 		if offset != '0':
 			url_params['offset'] = offset
 
-		pretty_dict = json.dumps(url_params, indent=4, ensure_ascii=False)
-		log_debug(f"(Startup Search) url_params is : {pretty_dict}")
+		#pretty_dict = json.dumps(url_params, indent=4, ensure_ascii=False)
+		#log_debug(f"(Startup Search) url_params is : {pretty_dict}")
 
 		search_purl = f"{ADDON_URL}?{urlencode(url_params)}"
 		log_debug(f"(Startup Search) search_purl: {search_purl}")
